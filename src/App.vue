@@ -60,11 +60,18 @@
                   历史时间轴
                 </template>
               </el-tab-pane>
+              <el-tab-pane name="sync">
+                <template #label>
+                  <el-icon style="margin-right: 4px"><Connection /></el-icon>
+                  协作同步
+                </template>
+              </el-tab-pane>
             </el-tabs>
           </div>
           <div class="panel-content">
             <SearchBar v-if="bottomPanelActive === 'search'" />
-            <Timeline v-else />
+            <Timeline v-else-if="bottomPanelActive === 'timeline'" />
+            <SyncPanel v-else-if="bottomPanelActive === 'sync'" />
           </div>
         </div>
       </section>
@@ -127,12 +134,14 @@ import {
   MoreFilled,
   Search,
   Clock,
+  Connection,
 } from "@element-plus/icons-vue"
 import { useAppStore } from "@/stores/app"
 import FileTree from "@/components/FileTree.vue"
 import FileViewer from "@/components/FileViewer.vue"
 import SearchBar from "@/components/SearchBar.vue"
 import Timeline from "@/components/Timeline.vue"
+import SyncPanel from "@/components/SyncPanel.vue"
 
 const store = useAppStore()
 const bottomPanelActive = ref("search")

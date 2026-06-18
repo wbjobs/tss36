@@ -30,7 +30,7 @@ pub fn semantic_search(
     filters: Option<SearchFiltersDto>,
     state: State<'_, AppState>,
 ) -> Result<Vec<SearchResultDto>, String> {
-    let conn = state.db_connection.lock().map_err(|e| e.to_string())?;
+    let conn = state.db_connection.read();
 
     let search_filters = match filters {
         Some(f) => {

@@ -11,21 +11,7 @@ pub fn watch_folder(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let db_conn = {
-        let conn_guard = state.db_connection.lock().map_err(|e| e.to_string())?;
-        let conn = match Connection::open_in_memory() {
-            Ok(c) => c,
-            Err(e) => return Err(format!("创建临时连接失败: {}", e)),
-        };
-        let _ = conn;
-        Arc::new(TokioMutex::new(
-            std::mem::replace(
-                &mut *conn_guard,
-                Connection::open_in_memory().map_err(|e| e.to_string())?,
-            )
-        ))
-    };
-
+    let _conn = state.db_connection.read();
     return Err("当前不支持此命令的跨线程连接共享，请使用 commands::watch_folder_v2。".to_string());
 }
 
@@ -42,14 +28,14 @@ pub fn watch_folder_v2(
         return Err(format!("路径不是目录: {}", path));
     }
 
-    let existing = state.watched_path.lock().map_err(|e| e.to_string())?;
+    let existing = state.watched_path.read().clone();
     if existing.is_some() {
         return Err("已有监听中的目录，请先停止当前监听".to_string());
     }
     drop(existing);
 
     let db_path = {
-        let conn = state.db_connection.lock().map_err(|e| e.to_string())?;
+        let conn = state.db_connection.read();
         match conn.query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2)) {
             Ok(p) if !p.is_empty() => p,
             _ => {
@@ -69,12 +55,11 @@ pub fn watch_folder_v2(
         .map_err(|e| e.to_string())?;
 
     {
-        let mut handle_guard = state.watcher_handle.lock().map_err(|e| e.to_string())?;
-        *handle_guard = Some(controller);
+        *state.watcher_handle.write() = Some(controller);
     }
     {
-        let mut path_guard = state.watched_path.lock().map_err(|e| e.to_string())?;
-        *path_guard = Some(path);
+        *state.watched_path.write() = Some(path.clone());
+        *state.sync_client.watch_path.write() = path;
     }
 
     Ok(())
@@ -82,20 +67,17 @@ pub fn watch_folder_v2(
 
 #[tauri::command]
 pub fn stop_watching(state: State<'_, AppState>) -> Result<(), String> {
-    let mut handle_guard = state.watcher_handle.lock().map_err(|e| e.to_string())?;
-    if let Some(mut controller) = handle_guard.take() {
+    if let Some(mut controller) = state.watcher_handle.write().take() {
         controller.stop();
     }
-    drop(handle_guard);
 
-    let mut path_guard = state.watched_path.lock().map_err(|e| e.to_string())?;
-    *path_guard = None;
+    *state.watched_path.write() = None;
+    *state.sync_client.watch_path.write() = String::new();
 
     Ok(())
 }
 
 #[tauri::command]
 pub fn get_watched_folder(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let guard = state.watched_path.lock().map_err(|e| e.to_string())?;
-    Ok(guard.clone())
+    Ok(state.watched_path.read().clone())
 }

@@ -1,6 +1,6 @@
 import { defineStore } from "pinia"
 import { ref } from "vue"
-import type { FileNode, VersionInfo, SearchResult, SearchFilters, TimelineGroup, TimelineItem } from "@/types"
+import type { FileNode, VersionInfo, SearchResult, SearchFilters, TimelineGroup, TimelineItem, SyncStats, ConflictInfo, PeerInfo } from "@/types"
 import {
   watchFolder,
   stopWatching,
@@ -10,6 +10,16 @@ import {
   getFileVersionContent,
   semanticSearch,
   restoreVersion as apiRestoreVersion,
+  startSyncServer,
+  stopSyncServer,
+  connectToServer as apiConnectToServer,
+  disconnectSync as apiDisconnectSync,
+  publishLocalVersions,
+  pullRemoteVersions,
+  getSyncStats as apiGetSyncStats,
+  getConflicts as apiGetConflicts,
+  resolveConflict as apiResolveConflict,
+  getConnectedPeers as apiGetConnectedPeers,
 } from "@/api/tauri"
 import { ElMessage } from "element-plus"
 
@@ -24,6 +34,22 @@ export const useAppStore = defineStore("app", () => {
   const fileContent = ref<string>("")
   const isLoading = ref<boolean>(false)
   const activeVersion = ref<number | null>(null)
+
+  const syncStats = ref<SyncStats>({
+    files_synced: 0,
+    blocks_transferred: 0,
+    bytes_transferred: 0,
+    conflicts_detected: 0,
+    conflicts_resolved: 0,
+    last_sync_time: null,
+    connected_clients: 0,
+    is_server_mode: false,
+  })
+  const conflicts = ref<ConflictInfo[]>([])
+  const connectedPeers = ref<PeerInfo[]>([])
+  const isSyncing = ref<boolean>(false)
+  const syncServerAddr = ref<string>("")
+  const syncMode = ref<"none" | "server" | "client">("none")
 
   async function setWatchedFolder(path: string) {
     try {
@@ -143,6 +169,110 @@ export const useAppStore = defineStore("app", () => {
     return groups.sort((a, b) => (a.date < b.date ? 1 : -1))
   }
 
+  async function startServer(port: number) {
+    try {
+      isLoading.value = true
+      const addr = await startSyncServer(port)
+      syncServerAddr.value = addr
+      syncMode.value = "server"
+      ElMessage.success(`同步服务器已启动: ${addr}`)
+      await refreshSyncData()
+    } catch (error) {
+      ElMessage.error(`启动同步服务器失败: ${error}`)
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function connectToServer(address: string) {
+    try {
+      isLoading.value = true
+      await apiConnectToServer(address)
+      syncServerAddr.value = address
+      syncMode.value = "client"
+      ElMessage.success(`已连接到服务器: ${address}`)
+      await refreshSyncData()
+    } catch (error) {
+      ElMessage.error(`连接服务器失败: ${error}`)
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function disconnectSync() {
+    try {
+      isLoading.value = true
+      await apiDisconnectSync()
+      if (syncMode.value === "server") {
+        await stopSyncServer()
+      }
+      syncMode.value = "none"
+      syncServerAddr.value = ""
+      syncStats.value = {
+        files_synced: 0,
+        blocks_transferred: 0,
+        bytes_transferred: 0,
+        conflicts_detected: 0,
+        conflicts_resolved: 0,
+        last_sync_time: null,
+        connected_clients: 0,
+        is_server_mode: false,
+      }
+      conflicts.value = []
+      connectedPeers.value = []
+      ElMessage.success("已断开同步连接")
+    } catch (error) {
+      ElMessage.error(`断开同步失败: ${error}`)
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function syncNow() {
+    if (syncMode.value === "none") {
+      ElMessage.warning("请先启动服务器或连接到服务器")
+      return
+    }
+    try {
+      isSyncing.value = true
+      await publishLocalVersions()
+      const result = await pullRemoteVersions()
+      ElMessage.success(
+        `同步完成: 拉取 ${result.versions_pulled} 个版本, ${result.blocks_pulled} 个数据块, ${result.conflicts_found} 个冲突`
+      )
+      await refreshSyncData()
+    } catch (error) {
+      ElMessage.error(`同步失败: ${error}`)
+    } finally {
+      isSyncing.value = false
+    }
+  }
+
+  async function resolveConflict(filePath: string, chooseLocal: boolean) {
+    try {
+      await apiResolveConflict(filePath, chooseLocal)
+      ElMessage.success(`冲突已解决: ${filePath}`)
+      await refreshSyncData()
+    } catch (error) {
+      ElMessage.error(`解决冲突失败: ${error}`)
+    }
+  }
+
+  async function refreshSyncData() {
+    try {
+      const [stats, conflictList, peers] = await Promise.all([
+        apiGetSyncStats(),
+        apiGetConflicts(),
+        apiGetConnectedPeers(),
+      ])
+      syncStats.value = stats
+      conflicts.value = conflictList
+      connectedPeers.value = peers
+    } catch {
+      // silently ignore
+    }
+  }
+
   return {
     watchedFolder,
     selectedFile,
@@ -154,6 +284,12 @@ export const useAppStore = defineStore("app", () => {
     fileContent,
     isLoading,
     activeVersion,
+    syncStats,
+    conflicts,
+    connectedPeers,
+    isSyncing,
+    syncServerAddr,
+    syncMode,
     setWatchedFolder,
     selectFile,
     loadFileContent,
@@ -162,5 +298,11 @@ export const useAppStore = defineStore("app", () => {
     refreshTree,
     restoreVersion,
     getTimelineGroups,
+    startServer,
+    connectToServer,
+    disconnectSync,
+    syncNow,
+    resolveConflict,
+    refreshSyncData,
   }
 })

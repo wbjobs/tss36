@@ -5,6 +5,7 @@ pub mod watcher;
 pub mod embedding;
 pub mod search;
 pub mod commands;
+pub mod sync;
 
 use std::path::PathBuf;
 
@@ -58,13 +59,14 @@ pub fn run() {
             };
 
             {
-                let conn = state.db_connection.lock().map_err(|e| {
-                    let err = anyhow::anyhow!("锁定数据库失败: {}", e);
-                    Box::new(err) as Box<dyn std::error::Error + Send + Sync>
-                })?;
+                let conn = state.db_connection.read();
                 init_schema(&conn).map_err(|e| {
                     Box::new(e) as Box<dyn std::error::Error + Send + Sync>
                 })?;
+            }
+
+            if let Some(path) = state.watched_path.read().clone() {
+                *state.sync_client.watch_path.write() = path;
             }
 
             app.manage(state);
@@ -80,6 +82,16 @@ pub fn run() {
             commands::watch_folder,
             commands::stop_watching,
             commands::get_watched_folder,
+            commands::start_sync_server,
+            commands::stop_sync_server,
+            commands::connect_to_server,
+            commands::disconnect_sync,
+            commands::publish_local_versions,
+            commands::pull_remote_versions,
+            commands::get_sync_stats,
+            commands::get_conflicts,
+            commands::resolve_conflict,
+            commands::get_connected_peers,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

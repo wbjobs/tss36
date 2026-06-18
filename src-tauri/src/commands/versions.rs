@@ -42,7 +42,7 @@ pub fn get_file_versions(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<VersionInfo>, String> {
-    let conn = state.db_connection.lock().map_err(|e| e.to_string())?;
+    let conn = state.db_connection.read();
     let file_path = PathBuf::from(&path);
     let path_str = file_path.to_slash_lossy().to_string();
 
@@ -67,7 +67,7 @@ pub fn get_file_version_content(
     version: i64,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let conn = state.db_connection.lock().map_err(|e| e.to_string())?;
+    let conn = state.db_connection.read();
     let file_path = PathBuf::from(&path);
     let path_str = file_path.to_slash_lossy().to_string();
 
@@ -88,7 +88,7 @@ pub fn restore_version(
     version: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let conn = state.db_connection.lock().map_err(|e| e.to_string())?;
+    let conn = state.db_connection.read();
     let file_path = PathBuf::from(&path);
     let path_str = file_path.to_slash_lossy().to_string();
 
