@@ -1,3 +1,7 @@
 pub mod engine;
 
-pub use engine::{compute_diff, apply_diff, reconstruct_content, hash_content};
+pub use engine::{
+    FileBlock, BlockDiffResult, DEFAULT_BLOCK_SIZE,
+    split_into_blocks, compute_block_diff, reconstruct_from_blocks,
+    xxh3_hash, hash_content, hash_bytes,
+};

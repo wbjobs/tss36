@@ -9,6 +9,7 @@ pub struct FileRecord {
     pub first_seen: DateTime<Local>,
     pub last_modified: DateTime<Local>,
     pub current_hash: String,
+    pub total_size: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,10 +18,30 @@ pub struct VersionRecord {
     pub file_id: i64,
     pub version_number: i64,
     pub timestamp: DateTime<Local>,
-    pub diff_patch: String,
     pub prev_content_hash: String,
     pub new_content_hash: String,
-    pub content_snapshot: Option<String>,
+    pub is_full_snapshot: bool,
+    pub file_size: i64,
+    pub block_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockRecord {
+    pub id: i64,
+    pub block_hash: String,
+    pub block_size: i64,
+    pub data: Vec<u8>,
+    pub ref_count: i64,
+    pub created_at: DateTime<Local>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionBlockRecord {
+    pub id: i64,
+    pub version_id: i64,
+    pub block_id: i64,
+    pub block_index: i64,
+    pub block_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +59,8 @@ CREATE TABLE IF NOT EXISTS files (
     file_type TEXT NOT NULL,
     first_seen DATETIME NOT NULL,
     last_modified DATETIME NOT NULL,
-    current_hash TEXT NOT NULL
+    current_hash TEXT NOT NULL,
+    total_size INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS versions (
@@ -46,15 +68,41 @@ CREATE TABLE IF NOT EXISTS versions (
     file_id INTEGER NOT NULL,
     version_number INTEGER NOT NULL,
     timestamp DATETIME NOT NULL,
-    diff_patch TEXT NOT NULL,
     prev_content_hash TEXT NOT NULL,
     new_content_hash TEXT NOT NULL,
-    content_snapshot TEXT,
+    is_full_snapshot INTEGER NOT NULL DEFAULT 0,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    block_count INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_versions_file_id ON versions(file_id);
 CREATE INDEX IF NOT EXISTS idx_versions_version_number ON versions(version_number);
+
+CREATE TABLE IF NOT EXISTS blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    block_hash TEXT NOT NULL UNIQUE,
+    block_size INTEGER NOT NULL,
+    data BLOB NOT NULL,
+    ref_count INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_blocks_hash ON blocks(block_hash);
+
+CREATE TABLE IF NOT EXISTS version_blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id INTEGER NOT NULL,
+    block_id INTEGER NOT NULL,
+    block_index INTEGER NOT NULL,
+    block_hash TEXT NOT NULL,
+    FOREIGN KEY (version_id) REFERENCES versions(id) ON DELETE CASCADE,
+    FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_version_blocks_version_id ON version_blocks(version_id);
+CREATE INDEX IF NOT EXISTS idx_version_blocks_block_id ON version_blocks(block_id);
+CREATE INDEX IF NOT EXISTS idx_version_blocks_order ON version_blocks(version_id, block_index);
 
 CREATE TABLE IF NOT EXISTS embeddings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

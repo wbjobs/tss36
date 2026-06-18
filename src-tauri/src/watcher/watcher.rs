@@ -11,7 +11,6 @@ use walkdir::WalkDir;
 use path_slash::PathBufExt;
 
 use crate::db::{self, FileRecord};
-use crate::diff::engine::{compute_diff, hash_content};
 use crate::embedding::generate_embedding;
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
@@ -67,9 +66,9 @@ fn to_forward_slash_string(path: &Path) -> String {
     path.to_slash_lossy().to_string()
 }
 
-fn read_file_content_safe(path: &Path) -> Option<String> {
-    match std::fs::read_to_string(path) {
-        Ok(content) => Some(content),
+fn read_file_bytes_safe(path: &Path) -> Option<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
         Err(_) => None,
     }
 }
@@ -80,77 +79,44 @@ fn process_file_changed(conn: &Connection, path: &Path, event_type: FileEventTyp
 
     match event_type {
         FileEventType::Removed => {
-            if let Some(file) = db::get_file_by_path(conn, &path_str)? {
-                let _ = file;
-            }
             Ok(())
         }
         FileEventType::Created | FileEventType::Modified => {
-            let current_content = match read_file_content_safe(path) {
-                Some(c) => c,
+            let current_bytes = match read_file_bytes_safe(path) {
+                Some(b) => b,
                 None => return Ok(()),
             };
-            let new_hash = hash_content(&current_content);
 
             let file_record = db::get_file_by_path(conn, &path_str)?;
-            let (file_id, prev_content, prev_hash) = match file_record {
-                Some(record) => {
-                    let file_id = record.id;
-                    db::insert_file(conn, &path_str, &file_type, &new_hash)?;
-                    let prev_hash_val = record.current_hash.clone();
-                    let prev_content_val = if record.current_hash != new_hash {
-                        let versions = db::get_file_versions(conn, file_id)?;
-                        if versions.is_empty() {
-                            None
-                        } else {
-                            match crate::diff::engine::reconstruct_content(&versions) {
-                                Ok(c) => Some(c),
-                                Err(_) => None,
-                            }
+            let file_id = match file_record {
+                Some(ref rec) => rec.id,
+                None => db::insert_file(conn, &path_str, &file_type, "", current_bytes.len() as i64)?,
+            };
+
+            let prev_version_number = match &file_record {
+                Some(rec) => {
+                    let versions = db::get_file_versions(conn, rec.id)?;
+                    versions.last().map(|v| v.version_number)
+                }
+                None => None,
+            };
+
+            let (version_id, _, created) = db::create_new_version_from_content(
+                conn,
+                file_id,
+                &path_str,
+                &file_type,
+                &current_bytes,
+                prev_version_number,
+            )?;
+
+            if created {
+                if let Ok(content_str) = String::from_utf8(current_bytes.clone()) {
+                    if !content_str.trim().is_empty() {
+                        let embedding = generate_embedding(&content_str);
+                        if let Err(e) = db::insert_embedding(conn, version_id, &embedding) {
+                            eprintln!("警告: 生成 embedding 失败: {}", e);
                         }
-                    } else {
-                        None
-                    };
-                    (file_id, prev_content_val, prev_hash_val)
-                }
-                None => {
-                    let file_id = db::insert_file(conn, &path_str, &file_type, &new_hash)?;
-                    (file_id, None, String::new())
-                }
-            };
-
-            let should_create_version = match file_record {
-                Some(ref rec) => rec.current_hash != new_hash,
-                None => true,
-            };
-
-            if should_create_version {
-                let prev_content_str = prev_content.as_deref().unwrap_or("");
-                let diff = compute_diff(prev_content_str, &current_content);
-                let version_number = db::get_next_version_number(conn, file_id)?;
-
-                let snapshot = if version_number == 1 {
-                    Some(current_content.as_str())
-                } else if version_number % 10 == 0 {
-                    Some(current_content.as_str())
-                } else {
-                    None
-                };
-
-                let version_id = db::insert_version(
-                    conn,
-                    file_id,
-                    version_number,
-                    &diff,
-                    &prev_hash,
-                    &new_hash,
-                    snapshot,
-                )?;
-
-                if !current_content.trim().is_empty() {
-                    let embedding = generate_embedding(&current_content);
-                    if let Err(e) = db::insert_embedding(conn, version_id, &embedding) {
-                        eprintln!("警告: 生成 embedding 失败: {}", e);
                     }
                 }
             }

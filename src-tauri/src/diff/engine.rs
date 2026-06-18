@@ -1,136 +1,127 @@
 use anyhow::{Context, Result};
-use similar::{ChangeTag, TextDiff};
-use similar::udiff::UnifiedDiff;
-use crate::db::VersionRecord;
 
-pub fn compute_diff(old: &str, new: &str) -> String {
-    let diff = TextDiff::from_lines(old, new);
-    let udiff = UnifiedDiff::from_text_diff(&diff)
-        .context_radius(3)
-        .to_string();
-    if udiff.is_empty() {
-        String::new()
-    } else {
-        udiff
-    }
+pub const DEFAULT_BLOCK_SIZE: usize = 64 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct FileBlock {
+    pub index: usize,
+    pub hash: String,
+    pub data: Vec<u8>,
+    pub size: usize,
 }
 
-fn parse_hunk_header(line: &str) -> Option<(usize, usize, usize, usize)> {
-    let trimmed = line.strip_prefix("@@")?.strip_suffix("@@")?.trim();
-    let parts: Vec<&str> = trimmed.split_whitespace().collect();
-    if parts.len() != 2 {
-        return None;
+pub fn xxh3_hash(data: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in data {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
     }
-    let parse_part = |s: &str| -> Option<(usize, usize)> {
-        let s = s.strip_prefix('-').or_else(|| s.strip_prefix('+'))?;
-        if let Some((start, count)) = s.split_once(',') {
-            let start: usize = start.parse().ok()?;
-            let count: usize = count.parse().ok()?;
-            Some((start.saturating_sub(1), count))
+    let mut hash2: u64 = 0x9e3779b97f4a7c15;
+    for chunk in data.chunks(8) {
+        let mut val: u64 = 0;
+        for (i, &b) in chunk.iter().enumerate() {
+            val |= (b as u64) << (i * 8);
+        }
+        hash2 ^= val;
+        hash2 = hash2.rotate_left(13);
+        hash2 = hash2.wrapping_mul(5).wrapping_add(0xe6546b64);
+    }
+    format!("{:016x}{:016x}", hash, hash2)
+}
+
+pub fn split_into_blocks(data: &[u8], block_size: usize) -> Vec<FileBlock> {
+    if data.is_empty() {
+        return vec![FileBlock {
+            index: 0,
+            hash: xxh3_hash(&[]),
+            data: Vec::new(),
+            size: 0,
+        }];
+    }
+    let mut blocks = Vec::new();
+    let mut index = 0usize;
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let end = (offset + block_size).min(data.len());
+        let chunk = &data[offset..end];
+        blocks.push(FileBlock {
+            index,
+            hash: xxh3_hash(chunk),
+            data: chunk.to_vec(),
+            size: chunk.len(),
+        });
+        index += 1;
+        offset = end;
+    }
+    blocks
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockDiffResult {
+    pub added_blocks: Vec<FileBlock>,
+    pub kept_block_hashes: Vec<String>,
+    pub ordered_hashes: Vec<String>,
+    pub total_size: usize,
+    pub changed_count: usize,
+    pub unchanged_count: usize,
+}
+
+pub fn compute_block_diff(
+    old_blocks: &[FileBlock],
+    new_blocks: &[FileBlock],
+) -> BlockDiffResult {
+    let old_hash_set: std::collections::HashSet<&str> = old_blocks
+        .iter()
+        .map(|b| b.hash.as_str())
+        .collect();
+    let mut added_blocks = Vec::new();
+    let mut kept_block_hashes = Vec::new();
+    let mut ordered_hashes = Vec::new();
+    let mut changed_count = 0usize;
+    let mut unchanged_count = 0usize;
+
+    for new_block in new_blocks {
+        ordered_hashes.push(new_block.hash.clone());
+        if old_hash_set.contains(new_block.hash.as_str()) {
+            kept_block_hashes.push(new_block.hash.clone());
+            unchanged_count += 1;
         } else {
-            let start: usize = s.parse().ok()?;
-            Some((start.saturating_sub(1), 1))
+            added_blocks.push(new_block.clone());
+            changed_count += 1;
         }
-    };
-    let old_range = parse_part(parts[0])?;
-    let new_range = parse_part(parts[1])?;
-    Some((old_range.0, old_range.1, new_range.0, new_range.1))
+    }
+
+    let total_size = new_blocks.iter().map(|b| b.size).sum();
+    BlockDiffResult {
+        added_blocks,
+        kept_block_hashes,
+        ordered_hashes,
+        total_size,
+        changed_count,
+        unchanged_count,
+    }
 }
 
-pub fn apply_diff(original: &str, patch: &str) -> Result<String> {
-    if patch.is_empty() {
-        return Ok(original.to_string());
-    }
-    let mut original_lines: Vec<&str> = original.lines().collect();
-    let mut result_lines: Vec<String> = Vec::new();
-    let mut orig_idx = 0;
-    let mut in_hunk = false;
-    let patch_lines: Vec<&str> = patch.lines().collect();
-    let mut i = 0;
-    while i < patch_lines.len() {
-        let line = patch_lines[i];
-        if line.starts_with("--- ") || line.starts_with("+++ ") {
-            i += 1;
-            continue;
-        }
-        if line.starts_with("@@") {
-            if in_hunk {
-                while orig_idx < original_lines.len() {
-                    result_lines.push(original_lines[orig_idx].to_string());
-                    orig_idx += 1;
-                }
-            }
-            in_hunk = true;
-            if let Some((old_start, _old_count, _new_start, _new_count)) = parse_hunk_header(line) {
-                while orig_idx < old_start && orig_idx < original_lines.len() {
-                    result_lines.push(original_lines[orig_idx].to_string());
-                    orig_idx += 1;
-                }
-            }
-            i += 1;
-            continue;
-        }
-        if in_hunk {
-            if let Some(rest) = line.strip_prefix(' ') {
-                if orig_idx < original_lines.len() {
-                    result_lines.push(rest.to_string());
-                    orig_idx += 1;
-                } else {
-                    result_lines.push(rest.to_string());
-                }
-            } else if let Some(rest) = line.strip_prefix('-') {
-                if orig_idx < original_lines.len() {
-                    orig_idx += 1;
-                }
-                let _ = rest;
-            } else if let Some(rest) = line.strip_prefix('+') {
-                result_lines.push(rest.to_string());
-            } else if line.starts_with('\\') {
-            }
-        }
-        i += 1;
-    }
-    while orig_idx < original_lines.len() {
-        result_lines.push(original_lines[orig_idx].to_string());
-        orig_idx += 1;
-    }
-    let mut result = result_lines.join("\n");
-    let orig_ends_newline = original.ends_with('\n');
-    let patch_ends_newline = patch.ends_with('\n') || result_lines.is_empty();
-    let _ = patch_ends_newline;
-    if orig_ends_newline && !result.ends_with('\n') {
-        result.push('\n');
+pub fn reconstruct_from_blocks(
+    ordered_hashes: &[String],
+    hash_to_data: &std::collections::HashMap<String, Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let mut result = Vec::new();
+    for hash in ordered_hashes {
+        let data = hash_to_data
+            .get(hash)
+            .with_context(|| format!("找不到块数据，hash={}", hash))?;
+        result.extend_from_slice(data);
     }
     Ok(result)
 }
 
-pub fn reconstruct_content(versions_sorted: &[VersionRecord]) -> Result<String> {
-    if versions_sorted.is_empty() {
-        return Err(anyhow::anyhow!("版本列表为空"));
-    }
-    let mut content = String::new();
-    for (idx, version) in versions_sorted.iter().enumerate() {
-        if idx == 0 {
-            if let Some(snapshot) = &version.content_snapshot {
-                content = snapshot.clone();
-            } else {
-                content = apply_diff("", &version.diff_patch)
-                    .context("应用初始版本补丁失败")?;
-            }
-        } else {
-            content = apply_diff(&content, &version.diff_patch)
-                .context(format!("应用版本 {} 补丁失败", version.version_number))?;
-        }
-    }
-    Ok(content)
+pub fn hash_bytes(data: &[u8]) -> String {
+    xxh3_hash(data)
 }
 
 pub fn hash_content(content: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    content.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    xxh3_hash(content.as_bytes())
 }
 
 #[cfg(test)]
@@ -138,18 +129,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_diff_roundtrip() {
-        let original = "line1\nline2\nline3\nline4\nline5\n";
-        let modified = "line1\nline2 modified\nline3\nline4 new\nline5\n";
-        let diff = compute_diff(original, modified);
-        let result = apply_diff(original, &diff).unwrap();
-        assert_eq!(result, modified);
+    fn test_split_blocks_small() {
+        let data = b"hello world";
+        let blocks = split_into_blocks(data, DEFAULT_BLOCK_SIZE);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].size, 11);
     }
 
     #[test]
-    fn test_empty_diff() {
-        let text = "hello\nworld\n";
-        let diff = compute_diff(text, text);
-        assert!(diff.is_empty());
+    fn test_split_blocks_multiple() {
+        let data = vec![0u8; 200_000];
+        let blocks = split_into_blocks(&data, 64 * 1024);
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].size, 65536);
+        assert_eq!(blocks[1].size, 65536);
+        assert_eq!(blocks[2].size, 65536);
+        assert_eq!(blocks[3].size, 3392);
+    }
+
+    #[test]
+    fn test_block_diff_identical() {
+        let data = vec![0u8; 200_000];
+        let blocks_a = split_into_blocks(&data, 64 * 1024);
+        let blocks_b = split_into_blocks(&data, 64 * 1024);
+        let diff = compute_block_diff(&blocks_a, &blocks_b);
+        assert_eq!(diff.added_blocks.len(), 0);
+        assert_eq!(diff.changed_count, 0);
+        assert_eq!(diff.unchanged_count, 4);
+    }
+
+    #[test]
+    fn test_block_diff_one_block_changed() {
+        let mut data_a = vec![0u8; 200_000];
+        let mut data_b = data_a.clone();
+        for i in 0..1000 {
+            data_b[65536 + i] = 0xFF;
+        }
+        let blocks_a = split_into_blocks(&data_a, 64 * 1024);
+        let blocks_b = split_into_blocks(&data_b, 64 * 1024);
+        let diff = compute_block_diff(&blocks_a, &blocks_b);
+        assert_eq!(diff.added_blocks.len(), 1);
+        assert_eq!(diff.changed_count, 1);
+        assert_eq!(diff.unchanged_count, 3);
+    }
+
+    #[test]
+    fn test_reconstruct_roundtrip() {
+        let original = b"hello world this is a test file content".to_vec();
+        let blocks = split_into_blocks(&original, 5);
+        let mut map = std::collections::HashMap::new();
+        let mut hashes = Vec::new();
+        for b in &blocks {
+            map.insert(b.hash.clone(), b.data.clone());
+            hashes.push(b.hash.clone());
+        }
+        let reconstructed = reconstruct_from_blocks(&hashes, &map).unwrap();
+        assert_eq!(reconstructed, original);
+    }
+
+    #[test]
+    fn test_hash_deterministic() {
+        let h1 = xxh3_hash(b"test data");
+        let h2 = xxh3_hash(b"test data");
+        assert_eq!(h1, h2);
+        let h3 = xxh3_hash(b"different data");
+        assert_ne!(h1, h3);
     }
 }

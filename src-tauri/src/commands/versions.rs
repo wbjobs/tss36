@@ -19,23 +19,21 @@ pub struct VersionInfo {
 }
 
 fn build_version_info(v: VersionRecord, file_path: &str) -> VersionInfo {
-    let size_estimate = v.content_snapshot.as_ref()
-        .map(|s| s.len() as i64)
-        .unwrap_or_else(|| v.diff_patch.len() as i64);
+    let description = if v.version_number == 1 {
+        Some("初始版本".to_string())
+    } else if v.is_full_snapshot {
+        Some(format!("完整快照版本 #{} ({} 个块)", v.version_number, v.block_count))
+    } else {
+        Some(format!("增量版本 #{} ({} 个块)", v.version_number, v.block_count))
+    };
     VersionInfo {
         id: v.id.to_string(),
         file_path: file_path.to_string(),
         version_number: v.version_number,
         timestamp: v.timestamp,
-        diff_patch: v.diff_patch,
-        size: size_estimate,
-        message: if v.version_number == 1 {
-            Some("初始版本".to_string())
-        } else if v.content_snapshot.is_some() {
-            Some(format!("快照版本 #{}", v.version_number))
-        } else {
-            None
-        },
+        diff_patch: String::new(),
+        size: v.file_size,
+        message: description,
     }
 }
 
