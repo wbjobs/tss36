@@ -32,3 +32,20 @@ __pycache__/
 # Env
 .env
 .env.local
+
+# Rust / Tauri
+/src-tauri/target/
+/src-tauri/Cargo.lock
+/src-tauri/gen/
+/src-tauri/icons/
+/src-tauri/*.log
+
+# App data (local databases)
+docversion_data/
+*.db
+*.sqlite
+*.sqlite3
+
+# OS specific
+$RECYCLE.BIN/
+System Volume Information
